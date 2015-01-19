@@ -48,6 +48,23 @@ public class ByteArrayUtils {
 		}
 
 	}
+	/**
+	 * Adds the minimum amount of TLS-CBC-style padding in order to make the array
+	 * size a multiple of the block size. NOTE: if the array is already a multiple 
+	 * of the block size this will add an entire block, as required in RFC5246
+	 * 
+	 * @param array
+	 *            the array to be padded.
+	 * @param blockSize
+	 *            Block size of the cipher - usually 16
+	 * @return a new array strictly larger than the given one
+	 */
+	public static byte[] padArray(byte[] array, int blockSize) {
+		int requiredLength = (array.length / blockSize + 1) * blockSize;
+		byte padding = (byte) (requiredLength - array.length - 1);
+
+		return padArray(array, padding, requiredLength);
+	}	
 
 	/**
 	 * Truncates the given array to the request length.
