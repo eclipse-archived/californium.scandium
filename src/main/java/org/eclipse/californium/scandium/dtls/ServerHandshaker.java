@@ -108,6 +108,8 @@ public class ServerHandshaker extends Handshaker {
 		this.supportedCipherSuites.add(CipherSuite.SSL_NULL_WITH_NULL_NULL);
 		this.supportedCipherSuites.add(CipherSuite.TLS_PSK_WITH_AES_128_CCM_8);
 		this.supportedCipherSuites.add(CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8);
+		this.supportedCipherSuites.add(CipherSuite.TLS_PSK_WITH_AES_128_CBC_SHA256);
+		this.supportedCipherSuites.add(CipherSuite.TLS_PSK_WITH_AES_128_CBC_SHA);
 		
 		this.pskStore = config.pskStore;
 		

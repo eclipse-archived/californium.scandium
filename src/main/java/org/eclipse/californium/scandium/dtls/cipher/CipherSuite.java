@@ -38,8 +38,10 @@ public enum CipherSuite {
 	// Cipher suites //////////////////////////////////////////////////
 	
 	SSL_NULL_WITH_NULL_NULL("SSL_NULL_WITH_NULL_NULL", 0x0000, KeyExchangeAlgorithm.NULL, BulkCipherAlgorithm.NULL, MACAlgorithm.NULL, PRFAlgorithm.TLS_PRF_SHA256, CipherType.NULL),
-	TLS_PSK_WITH_AES_128_CCM_8("TLS_PSK_WITH_AES_128_CCM_8", 0xC0A8, KeyExchangeAlgorithm.PSK, BulkCipherAlgorithm.AES,	MACAlgorithm.NULL, PRFAlgorithm.TLS_PRF_SHA256,	CipherType.AEAD),
-	TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8("TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8", 0xC0AE, KeyExchangeAlgorithm.EC_DIFFIE_HELLMAN, BulkCipherAlgorithm.AES, MACAlgorithm.NULL, PRFAlgorithm.TLS_PRF_SHA256, CipherType.AEAD);
+	TLS_PSK_WITH_AES_128_CCM_8("TLS_PSK_WITH_AES_128_CCM_8", 0xC0A8, KeyExchangeAlgorithm.PSK, BulkCipherAlgorithm.AES_CCM,	MACAlgorithm.NULL, PRFAlgorithm.TLS_PRF_SHA256,	CipherType.AEAD),
+	TLS_PSK_WITH_AES_128_CBC_SHA256("TLS_PSK_WITH_AES_128_CBC_SHA256", 0x00AE, KeyExchangeAlgorithm.PSK, BulkCipherAlgorithm.AES_CBC,	MACAlgorithm.NULL, PRFAlgorithm.TLS_PRF_SHA256,	CipherType.BLOCK),
+	TLS_PSK_WITH_AES_128_CBC_SHA("TLS_PSK_WITH_AES_128_CBC_SHA", 0x008C, KeyExchangeAlgorithm.PSK, BulkCipherAlgorithm.AES_CBC,	MACAlgorithm.HMAC_SHA1, PRFAlgorithm.TLS_PRF_SHA256,	CipherType.BLOCK),
+	TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8("TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8", 0xC0AE, KeyExchangeAlgorithm.EC_DIFFIE_HELLMAN, BulkCipherAlgorithm.AES_CCM, MACAlgorithm.NULL, PRFAlgorithm.TLS_PRF_SHA256, CipherType.AEAD);
 	
 	// Logging ////////////////////////////////////////////////////////
 
@@ -118,14 +120,21 @@ public enum CipherSuite {
 		switch (code) {
 		case 0x0000:
 			return CipherSuite.SSL_NULL_WITH_NULL_NULL;
+		case 0x00AE:
+			return CipherSuite.TLS_PSK_WITH_AES_128_CBC_SHA256;
+		case 0x008C:
+			if (LOGGER.isLoggable(Level.WARNING)) {
+				LOGGER.warning("Client specified a cipher suite with SHA-1: " + code);
+			}
+			return CipherSuite.TLS_PSK_WITH_AES_128_CBC_SHA;
 		case 0xC0A8:
 			return CipherSuite.TLS_PSK_WITH_AES_128_CCM_8;
 		case 0xC0AE:
 			return CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8;
 
 		default:
-			if (LOGGER.isLoggable(Level.WARNING)) {
-			    LOGGER.warning("Unknown cipher suite code, fallback to SSL_NULL_WITH_NULL_NULL: " + code);
+			if (LOGGER.isLoggable(Level.INFO)) {
+			   LOGGER.info("Unknown cipher suite code, fallback to SSL_NULL_WITH_NULL_NULL: " + code);
 			}
 			return CipherSuite.SSL_NULL_WITH_NULL_NULL;
 		}
@@ -175,7 +184,8 @@ public enum CipherSuite {
 		NULL(0, 0, 0, 0),
 		RC4(0, 16, 4, 8), // don't know
 		B_3DES(0, 16, 4, 8), // don't know
-		AES(0, 16, 4, 8); // http://www.ietf.org/mail-archive/web/tls/current/msg08445.html
+		AES_CBC(32, 16, 16, 8),
+		AES_CCM(0, 16, 4, 8); // http://www.ietf.org/mail-archive/web/tls/current/msg08445.html
 		
 		// values in octets!
 		private int macKeyLength;

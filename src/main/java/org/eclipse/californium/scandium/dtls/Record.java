@@ -16,11 +16,22 @@
  ******************************************************************************/
 package org.eclipse.californium.scandium.dtls;
 
+import java.security.InvalidAlgorithmParameterException;
+import java.security.InvalidKeyException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import javax.crypto.BadPaddingException;
+import javax.crypto.Cipher;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.NoSuchPaddingException;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 
 import org.eclipse.californium.scandium.dtls.AlertMessage.AlertDescription;
 import org.eclipse.californium.scandium.dtls.AlertMessage.AlertLevel;
@@ -229,7 +240,7 @@ public class Record {
 			break;
 			
 		case BLOCK:
-			// TODO implement block cipher
+			encryptedFragment = encryptBlock(byteArray);
 			break;
 			
 		case STREAM:
@@ -273,7 +284,7 @@ public class Record {
 			break;
 			
 		case BLOCK:
-			// TODO implement block cipher
+			fragment = decryptBlock(byteArray);
 			break;
 			
 		case STREAM:
@@ -311,6 +322,39 @@ public class Record {
 		encryptedFragment = ByteArrayUtils.concatenate(explicitNonce, encryptedFragment);
 		
 		return encryptedFragment;
+	}
+	
+	protected byte[] encryptBlock(byte[] byteArray) {
+		Cipher cipher;
+		try {
+			// SSL3Padding doesn't seem to be implemented by Oracle, so we have to do it ourselves.
+			cipher = Cipher.getInstance("AES/CBC/NoPadding");
+			MessageDigest md = MessageDigest.getInstance("SHA-256");
+			javax.crypto.SecretKey key = session.getWriteState().getEncryptionKey();
+			
+			// gather data for the MAC code, calculate and append to data
+			DatagramWriter macData = new DatagramWriter();
+			macData.write(epoch, 16);
+			macData.writeLong(sequenceNumber, 48);
+			macData.write(type.getCode(), 8);
+			macData.write(version.getMajor(), 8);
+			macData.write(version.getMinor(), 8);
+			macData.write(byteArray.length, 16);
+			byte[] macIn = ByteArrayUtils.concatenate(macData.toByteArray(),byteArray);
+			byte[] macOut = Handshaker.doHMAC(md, session.getWriteState().getMacKey().getEncoded(), macIn);
+			byteArray = ByteArrayUtils.concatenate(byteArray, macOut);
+			
+			System.out.println("ENC MACIN: " + Arrays.toString(macIn));
+			System.out.println("ENC MACOUT: " + Arrays.toString(macOut));
+			// CBC mode has an explicit IV at the start of the block - let Java generate one
+			cipher.init(Cipher.ENCRYPT_MODE, key);
+			byte[] cipherText = cipher.doFinal(ByteArrayUtils.padArray(byteArray, cipher.getBlockSize()));
+			
+			return ByteArrayUtils.concatenate(cipher.getIV(), cipherText);
+		} catch (NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException | IllegalBlockSizeException | BadPaddingException e) {
+				LOGGER.log(Level.SEVERE,"Could not decrypt the message.",e);
+				return new byte[] {};
+		}
 	}
 	
 	/**
@@ -357,6 +401,57 @@ public class Record {
 		byte[] decrypted = CCMBlockCipher.decrypt(key, nonce, additionalData, reader.readBytesLeft(), 8);
 
 		return decrypted;
+	}
+	
+	protected byte[] decryptBlock(byte[] byteArray) throws HandshakeException {
+
+		Cipher cipher;
+		try {
+			// SSL3Padding doesn't seem to be implemented by Oracle
+			cipher = Cipher.getInstance("AES/CBC/NoPadding");
+			MessageDigest md = MessageDigest.getInstance("SHA-256");
+			IvParameterSpec iv = session.getReadState().getIv();
+			javax.crypto.SecretKey key = session.getReadState().getEncryptionKey();
+			
+			// gather additional data for the MAC code
+			DatagramWriter macData = new DatagramWriter();
+			macData.write(epoch, 16);
+			macData.writeLong(sequenceNumber, 48);
+			macData.write(type.getCode(), 8);
+			macData.write(version.getMajor(), 8);
+			macData.write(version.getMinor(), 8);
+			
+			int bs = cipher.getBlockSize();
+			// in CBC mode the IV is the first block of the ciphertext
+			cipher.init(Cipher.DECRYPT_MODE, key, new IvParameterSpec(byteArray, 0, bs));
+			byte[] clearText = cipher.doFinal(byteArray, bs, byteArray.length - bs);
+			// verify padding
+			int padLen = clearText[clearText.length - 1];
+			boolean padOK = true;
+			for (int i = clearText.length - 1 - padLen; i < clearText.length; i++) {
+				if (clearText[i] != padLen)
+					padOK = false;
+			}
+			// trim MAC and padding
+			byte[] data = ByteArrayUtils.truncate(clearText, clearText.length - 1 - padLen - md.getDigestLength());
+			macData.write(data.length, 16);
+			byte[] macIn = ByteArrayUtils.concatenate(macData.toByteArray(),data);
+			byte[] macOut = Handshaker.doHMAC(md, session.getReadState().getMacKey().getEncoded(), macIn);
+			System.out.println("DEC MACIN: " + Arrays.toString(macIn));
+			System.out.println("DEC MACOUT: " + Arrays.toString(macOut));
+			boolean macOK = true;
+			for (int i = 0; i < macOut.length; i++) {
+				if (clearText[data.length + i] != macOut[i])
+					macOK = false;
+			}
+			if (!(padOK && macOK))
+				throw new InvalidKeyException("Padding or MAC invalid");
+			//if (!Arrays.e)
+			return data;
+		} catch (NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException | IllegalBlockSizeException | BadPaddingException | InvalidAlgorithmParameterException e) {
+			LOGGER.log(Level.SEVERE,"Could not decrypt the message.",e);
+			return new byte[] {};
+		}
 	}
 	
 	// Cryptography Helper Methods ////////////////////////////////////
