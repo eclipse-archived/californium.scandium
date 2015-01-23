@@ -26,7 +26,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.ConcurrentHashMap;
@@ -507,34 +506,16 @@ public class DTLSConnector extends ConnectorBase {
 		if (sessionID == null || sessionID.length == 0) {
 			return null;
 		}
-		
-		for (Entry<String, DTLSSession> entry : dtlsSessions.entrySet()) {
-			// FIXME session identifiers may not be set, when the handshake failed after the initial message
-			// these sessions must be deleted when this happens
-			try {
-				byte[] id = entry.getValue().getSessionIdentifier().getSessionId();
-				if (Arrays.equals(sessionID, id)) {
-					return entry.getValue();
-				}
-			} catch (Exception e) {
-				continue;
+
+		for (DTLSSession session : dtlsSessions.values()) {
+			if (session.getSessionIdentifier() != null
+					&& Arrays.equals(sessionID, session.getSessionIdentifier().getSessionId())) {
+				return session;
 			}
 		}
-		
-		for (DTLSSession session:dtlsSessions.values()) {
-			try {
-				byte[] id = session.getSessionIdentifier().getSessionId();
-				if (Arrays.equals(sessionID, id)) {
-					return session;
-				}
-			} catch (Exception e) {
-				continue;
-			}
-		}
-		
 		return null;
 	}
-	
+
 	private void sendFlight(DTLSFlight flight) {
 		byte[] payload = new byte[] {};
 		
