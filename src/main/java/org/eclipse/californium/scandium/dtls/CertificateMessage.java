@@ -199,7 +199,7 @@ public class CertificateMessage extends HandshakeMessage {
 	 * @throws HandshakeException
 	 *             if the certificate could not be verified.
 	 */
-	public void verifyCertificate(Certificate[] trustedCertificates) throws HandshakeException {
+	public void verifyCertificate(Certificate[] trustedCertificates, boolean clientAuthenticationRequired) throws HandshakeException {
 		if (rawPublicKeyBytes == null) {
 			boolean verified = false;
 
@@ -211,9 +211,17 @@ public class CertificateMessage extends HandshakeMessage {
 				throw new HandshakeException("Certificate not valid.", alert);
 			}
 			
-			if (isSelfSigned(peerCertificate)) {
-				// TODO allow self-signed certificates?
+			if (clientAuthenticationRequired && isSelfSigned(peerCertificate)) {
+				// If client authentication is required, no self-signed peer certificates are allowed
 				LOGGER.info("Peer used self-signed certificate.");
+				AlertMessage alert = new AlertMessage(AlertLevel.FATAL, AlertDescription.UNKNOWN_CA);
+				throw new HandshakeException("Peer used self-signed certificate, no client authentication possible.", alert);
+			} else if (!clientAuthenticationRequired && isSelfSigned(peerCertificate)) {
+				// No client authentication required, allow self-signed peer certificates
+				LOGGER.info("Peer used self-signed certificate.");				
+				return;
+			} else if (!clientAuthenticationRequired && !isSelfSigned(peerCertificate)) {
+				// No validation of key chain required?
 				return;
 			}
 

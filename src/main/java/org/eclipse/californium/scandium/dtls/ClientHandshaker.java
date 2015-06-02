@@ -358,7 +358,7 @@ public class ClientHandshaker extends Handshaker {
 		}
 
 		serverCertificate = message;
-		serverCertificate.verifyCertificate(rootCertificates);
+		serverCertificate.verifyCertificate(rootCertificates, false);
 		serverPublicKey = serverCertificate.getPublicKey();
 		if (message.getCertificateChain() != null) {
 			peerCertificate = (X509Certificate) message.getCertificateChain()[0];
