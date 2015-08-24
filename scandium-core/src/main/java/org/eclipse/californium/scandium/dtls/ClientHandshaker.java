@@ -18,6 +18,9 @@
  *                                                    java.security.Principal (fix 464812)
  *    Kai Hudalla (Bosch Software Innovations GmbH) - notify SessionListener about start and completion
  *                                                    of handshake
+ *    Achim Kraus (Bosch Software Innovations GmbH) - add/enable optional support for
+ *                                                    server identity hint.
+ *
  ******************************************************************************/
 package org.eclipse.californium.scandium.dtls;
 
@@ -42,6 +45,7 @@ import org.eclipse.californium.scandium.dtls.AlertMessage.AlertLevel;
 import org.eclipse.californium.scandium.dtls.CertificateTypeExtension.CertificateType;
 import org.eclipse.californium.scandium.dtls.cipher.CipherSuite;
 import org.eclipse.californium.scandium.dtls.cipher.ECDHECryptography;
+import org.eclipse.californium.scandium.dtls.pskstore.ExtendedPskStore;
 import org.eclipse.californium.scandium.dtls.pskstore.PskStore;
 import org.eclipse.californium.scandium.util.ByteArrayUtils;
 
@@ -109,6 +113,7 @@ public class ClientHandshaker extends Handshaker {
 
 	/** Used to retrieve identity/pre-shared-key for a given destination */
 	protected final PskStore pskStore;
+	protected final ExtendedPskStore extendedPskStore;
 
 	
 	
@@ -136,6 +141,11 @@ public class ClientHandshaker extends Handshaker {
 		this.certificates = config.getCertificateChain();
 		this.publicKey = config.getPublicKey();
 		this.pskStore = config.getPskStore();
+		if (this.pskStore instanceof ExtendedPskStore) {
+			this.extendedPskStore = (ExtendedPskStore) this.pskStore;
+		} else {
+			this.extendedPskStore = null;
+		}
 		this.preferredCipherSuites = config.getSupportedCipherSuites();
 
 		this.supportedServerCertificateTypes = new ArrayList<>();
@@ -508,7 +518,16 @@ public class ClientHandshaker extends Handshaker {
 			break;
 
 		case PSK:
-			String identity = pskStore.getIdentity(getPeerAddress());
+			String identity;
+			if (null != extendedPskStore) {
+				String identityHint = null;
+				if (serverKeyExchange instanceof PSKServerKeyExchange) {
+					identityHint = ((PSKServerKeyExchange)serverKeyExchange).getHint();
+				}
+				identity = extendedPskStore.getIdentity(getPeerAddress(), identityHint);
+			} else {
+				identity = pskStore.getIdentity(getPeerAddress());
+			}
 			if (identity == null) {
 				AlertMessage alert = new AlertMessage(AlertLevel.FATAL, AlertDescription.HANDSHAKE_FAILURE, session.getPeer());
 				throw new HandshakeException("No Identity found for peer: "	+ getPeerAddress(), alert);

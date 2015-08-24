@@ -23,6 +23,9 @@
  *                                                    of handshake
  *    Kai Hudalla (Bosch Software Innovations GmbH) - only include client/server certificate type extensions
  *                                                    in SERVER_HELLO if required for cipher suite
+ *    Achim Kraus (Bosch Software Innovations GmbH) - add/enable optional support for
+ *                                                    server identity hint.
+ *                                                    
  ******************************************************************************/
 package org.eclipse.californium.scandium.dtls;
 
@@ -51,6 +54,7 @@ import org.eclipse.californium.scandium.dtls.cipher.CipherSuite;
 import org.eclipse.californium.scandium.dtls.cipher.CipherSuite.KeyExchangeAlgorithm;
 import org.eclipse.californium.scandium.dtls.cipher.ECDHECryptography;
 import org.eclipse.californium.scandium.dtls.cipher.ECDHECryptography.SupportedGroup;
+import org.eclipse.californium.scandium.dtls.pskstore.ExtendedPskStore;
 import org.eclipse.californium.scandium.dtls.pskstore.PskStore;
 import org.eclipse.californium.scandium.util.ByteArrayUtils;
 
@@ -112,6 +116,7 @@ public class ServerHandshaker extends Handshaker {
 	
 	/** Used to retrieve pre-shared-key from a given client identity */
 	protected final PskStore pskStore;
+	protected final ExtendedPskStore extendedPskStore;
 	
 	
 	
@@ -160,7 +165,11 @@ public class ServerHandshaker extends Handshaker {
 		this.supportedCipherSuites = Arrays.asList(config.getSupportedCipherSuites());
 		
 		this.pskStore = config.getPskStore();
-		
+		if (this.pskStore instanceof ExtendedPskStore) {
+			this.extendedPskStore = (ExtendedPskStore) this.pskStore;
+		} else {
+			this.extendedPskStore = null;
+		}
 		this.privateKey = config.getPrivateKey();
 		this.certificates = config.getCertificateChain();
 		this.publicKey = config.getPublicKey();
@@ -570,7 +579,12 @@ public class ServerHandshaker extends Handshaker {
 			 * Are there use cases that different PSKs are used for different
 			 * actions or time periods? How to configure the hint then? 
 			 */
-			// serverKeyExchange = new PSKServerKeyExchange("TODO");
+			if (null != extendedPskStore) {
+				String identityHint = extendedPskStore.getIdentityHint();
+				if (null != identityHint && !identityHint.isEmpty()) {
+					serverKeyExchange = new PSKServerKeyExchange(identityHint, getPeerAddress());
+				}
+			}
 			break;
 
 		default:
