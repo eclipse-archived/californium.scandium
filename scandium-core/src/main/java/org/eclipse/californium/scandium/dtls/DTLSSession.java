@@ -165,6 +165,7 @@ public class DTLSSession {
 			this.peer = peerAddress;
 			this.isClient = isClient;
 			this.cipherSuite = CipherSuite.TLS_NULL_WITH_NULL_NULL;
+			this.keyExchange = this.cipherSuite.getKeyExchange();
 			this.compressionMethod = CompressionMethod.NULL;
 			this.sequenceNumbers.put(0, initialSequenceNo);
 			// initialize current read/write state with NULL cipher suite
