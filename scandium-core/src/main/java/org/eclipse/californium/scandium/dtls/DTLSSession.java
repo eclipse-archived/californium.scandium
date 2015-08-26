@@ -107,9 +107,6 @@ public class DTLSSession {
 	/** The next sequence number the record must have for each epoch separately. */
 	private Map<Integer, Long> sequenceNumbers = new HashMap<>();
 	
-	/** The key exchange algorithm used in this session. */
-	private KeyExchangeAlgorithm keyExchange;
-	
 	/**
 	 * Indicates whether only the RawPublicKey is sent or a full X.509
 	 * certificates.
@@ -165,7 +162,6 @@ public class DTLSSession {
 			this.peer = peerAddress;
 			this.isClient = isClient;
 			this.cipherSuite = CipherSuite.TLS_NULL_WITH_NULL_NULL;
-			this.keyExchange = this.cipherSuite.getKeyExchange();
 			this.compressionMethod = CompressionMethod.NULL;
 			this.sequenceNumbers.put(0, initialSequenceNo);
 			// initialize current read/write state with NULL cipher suite
@@ -224,7 +220,6 @@ public class DTLSSession {
 	 */
 	final synchronized void setCipherSuite(CipherSuite cipherSuite) {
 		this.cipherSuite = cipherSuite;
-		this.keyExchange = cipherSuite.getKeyExchange();
 	}
 
 	public synchronized final boolean isActive() {
@@ -396,7 +391,7 @@ public class DTLSSession {
 	}
 
 	final KeyExchangeAlgorithm getKeyExchange() {
-		return keyExchange;
+		return cipherSuite.getKeyExchange();
 	}
 
 	/**
