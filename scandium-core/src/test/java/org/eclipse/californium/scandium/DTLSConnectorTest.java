@@ -20,6 +20,8 @@
  *                                                    keeping all information about the connection
  *                                                    to a peer in a single place
  *    Kai Hudalla (Bosch Software Innovations GmbH) - fix bug 472196
+ *    Achim Kraus (Bosch Software Innovations GmbH) - add tests for close(), send() and close()
+ *                                                    and send() during handshake.
  ******************************************************************************/
 package org.eclipse.californium.scandium;
 
@@ -33,6 +35,8 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.net.DatagramPacket;
@@ -51,6 +55,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.security.auth.x500.X500Principal;
 
@@ -101,7 +106,7 @@ public class DTLSConnectorTest {
 	private static InetSocketAddress serverEndpoint;
 	private static InMemoryConnectionStore serverSessionStore;
 	private static Certificate[] trustedCertificates;
-	private static SimpleRawDataChannel serverRawDataChannel;
+	private static LatchDecrementingRawDataChannel serverRawDataChannel;
 	private static RawDataProcessor defaultRawDataProcessor;
 	
 	DtlsConnectorConfig clientConfig;
@@ -109,7 +114,7 @@ public class DTLSConnectorTest {
 	InetSocketAddress clientEndpoint;
 	LatchDecrementingRawDataChannel clientRawDataChannel;
 	DTLSSession establishedSession;
-	ConnectionStore clientSessionStore;
+	CountingConnectionStore clientSessionStore;
 
 	@BeforeClass
 	public static void loadKeys() throws IOException, GeneralSecurityException {
@@ -130,7 +135,7 @@ public class DTLSConnectorTest {
 			}
 		};
 		
-		serverRawDataChannel = new SimpleRawDataChannel(defaultRawDataProcessor);
+		serverRawDataChannel = new LatchDecrementingRawDataChannel(defaultRawDataProcessor);
 		
 		InMemoryPskStore pskStore = new InMemoryPskStore();
 		pskStore.setKey("Client_identity", "secretPSK".getBytes());
@@ -162,7 +167,7 @@ public class DTLSConnectorTest {
 	@Before
 	public void setUp() throws Exception {
 
-		clientSessionStore = new InMemoryConnectionStore(5, 60);
+		clientSessionStore = new CountingConnectionStore(new InMemoryConnectionStore(5, 60));
 		clientEndpoint = new InetSocketAddress(InetAddress.getLocalHost(), 0);
 		clientConfig = newStandardConfig(clientEndpoint);
 
@@ -190,6 +195,116 @@ public class DTLSConnectorTest {
 	@Test
 	public void testConnectorEstablishesSecureSession() throws Exception {
 		givenAnEstablishedSession();
+	}
+
+	@Test
+	public void testSendDuringHandshake() throws Exception {
+		RawData msgToSend1 = new RawData("Hello World 1".getBytes(), serverEndpoint);
+		RawData msgToSend2 = new RawData("Hello World 2".getBytes(), serverEndpoint);
+
+		serverRawDataChannel.setProcessor(new RawDataProcessor() {
+			@Override
+			public RawData process(RawData request) {
+				// echo request
+				return new RawData(request.getBytes(), request.getInetSocketAddress());
+			}
+		});
+		
+		StoringRawDataChannel clientChannel = new StoringRawDataChannel();
+		
+		CountDownLatch latch = new CountDownLatch(2);
+		clientChannel.setLatch(latch);
+		client.setRawDataReceiver(clientChannel);
+		client.start();
+		clientEndpoint = client.getAddress();
+		client.send(msgToSend1); // send first message triggers handshake
+		client.send(msgToSend2); // send second message, very probably during handshake
+
+		// don't assert, one response may be missing!
+		latch.await(MAX_TIME_TO_WAIT_SECS, TimeUnit.SECONDS);
+		assertTrue(isSessionEstablished(clientEndpoint, serverSessionStore));
+		assertTrue(isSessionEstablished(serverEndpoint, clientSessionStore));
+
+		// check for responses
+		boolean response1 = false;
+		boolean response2 = false;
+		for (RawData message : clientChannel.messages) {
+			if (Arrays.equals(message.bytes, msgToSend1.getBytes())) {
+				response1 = true;
+			} else if (Arrays.equals(message.bytes, msgToSend2.getBytes())) {
+				response2 = true;
+			}
+		}
+
+		if (!response1 && !response2) {
+			fail("Missing both responses");
+		} else if (!response1) {
+			fail("Missing response 1");
+		} else if (!response2) {
+			fail("Missing response 2");
+		}
+		
+		client.releaseSocket();
+	}
+
+	@Test
+	public void testConnectorClose() throws Exception {
+		RawData msgToSend = new RawData("Hello World".getBytes(), serverEndpoint);
+
+		CountDownLatch latch = new CountDownLatch(1);
+		clientRawDataChannel.setLatch(latch);
+		client.setRawDataReceiver(clientRawDataChannel);
+		client.start();
+		clientEndpoint = client.getAddress();
+		client.send(msgToSend);
+
+		// check, if session is established
+		assertTrue(latch.await(MAX_TIME_TO_WAIT_SECS, TimeUnit.SECONDS));
+		assertTrue(isSessionEstablished(clientEndpoint, serverSessionStore));
+		assertTrue(isSessionEstablished(serverEndpoint, clientSessionStore));
+
+		client.close(serverEndpoint);
+
+		assertTrue("session at client not removed!", waitForSessionRemove(MAX_TIME_TO_WAIT_SECS, TimeUnit.SECONDS, serverEndpoint, clientSessionStore));
+		assertTrue("session at server not removed!", waitForSessionRemove(MAX_TIME_TO_WAIT_SECS, TimeUnit.SECONDS, clientEndpoint, serverSessionStore));
+		assertEquals(1, clientSessionStore.putCounter.get());
+		assertEquals(1, clientSessionStore.removeCounter.get());
+		client.releaseSocket();
+	}
+
+	@Test
+	public void testConnectorCloseAfterSend() throws Exception {
+		RawData msgToSend = new RawData("Hello World".getBytes(), serverEndpoint);
+		BlockingData msgToBlock = new BlockingData("Hello World delayed!".getBytes(), serverEndpoint);
+
+		CountDownLatch latch = new CountDownLatch(1);
+		clientRawDataChannel.setLatch(latch);
+		client.setRawDataReceiver(clientRawDataChannel);
+		client.start();
+		clientEndpoint = client.getAddress();
+		
+		client.send(msgToSend);
+
+		// check, if session is established
+		assertTrue(latch.await(MAX_TIME_TO_WAIT_SECS, TimeUnit.SECONDS));
+		assertTrue(isSessionEstablished(clientEndpoint, serverSessionStore));
+		assertTrue(isSessionEstablished(serverEndpoint, clientSessionStore));
+
+		CountDownLatch serverLatch = new CountDownLatch(1);
+		serverRawDataChannel.setLatch(serverLatch);
+		
+		msgToBlock.setBlocking(true);  // force race condition
+		client.send(msgToBlock);       // first send()
+		client.close(serverEndpoint);  // second close()
+		msgToBlock.setBlocking(false);
+
+		assertTrue("message not received at server!", serverLatch.await(MAX_TIME_TO_WAIT_SECS, TimeUnit.SECONDS));
+		assertTrue("session at client not removed!", waitForSessionRemove(MAX_TIME_TO_WAIT_SECS, TimeUnit.SECONDS, serverEndpoint, clientSessionStore));
+		assertTrue("session at server not removed!", waitForSessionRemove(MAX_TIME_TO_WAIT_SECS, TimeUnit.SECONDS, clientEndpoint, serverSessionStore));
+		assertEquals(1, clientSessionStore.putCounter.get());
+		assertEquals(1, clientSessionStore.removeCounter.get());
+
+		client.releaseSocket();
 	}
 
 	/**
@@ -619,26 +734,25 @@ public class DTLSConnectorTest {
 		client.releaseSocket();
 	}
 	
-	private class LatchDecrementingRawDataChannel extends SimpleRawDataChannel {
-		private CountDownLatch latch;
-		
-		public LatchDecrementingRawDataChannel() {
-			super(null);
-		}
-		
-		public synchronized void setLatch(CountDownLatch latchToDecrement) {
-			this.latch = latchToDecrement;
-		}
-		
-		@Override
-		public synchronized void receiveData(RawData raw) {
-			super.receiveData(raw);
-			if (latch != null) {
-				latch.countDown();
+	private boolean waitForSessionRemove(long timeout, TimeUnit unit, InetSocketAddress clientEndpoint, ConnectionStore store) {
+		final long end = System.currentTimeMillis() + TimeUnit.MILLISECONDS.convert(timeout, unit);
+		do {
+			if (!isSessionEstablished(clientEndpoint, store)) return true;
+			try {
+				Thread.sleep(100);
+			} catch(InterruptedException ex) {
 			}
-		}
+		} while(System.currentTimeMillis() < end);
+		return !isSessionEstablished(clientEndpoint, store);
 	}
-	
+
+	private boolean isSessionEstablished(InetSocketAddress clientEndpoint, ConnectionStore store) {
+		Connection con = store.get(clientEndpoint);
+		if (null == con) return false;
+		DTLSSession establishedSession = con.getEstablishedSession();
+		return (null != establishedSession);
+	}
+
 	private static class SimpleRawDataChannel implements RawDataChannel {
 		
 		private RawDataProcessor processor;
@@ -662,12 +776,113 @@ public class DTLSConnectorTest {
 		}
 	}
 	
+	private static class LatchDecrementingRawDataChannel extends SimpleRawDataChannel {
+		private CountDownLatch latch;
+		
+		public LatchDecrementingRawDataChannel() {
+			super(null);
+		}
+
+		public LatchDecrementingRawDataChannel(RawDataProcessor processor) {
+			super(processor);
+		}
+		
+		public synchronized void setLatch(CountDownLatch latchToDecrement) {
+			this.latch = latchToDecrement;
+		}
+		
+		@Override
+		public synchronized void receiveData(RawData raw) {
+			super.receiveData(raw);
+			if (latch != null) {
+				latch.countDown();
+			}
+		}
+	}
+	
+	private static class StoringRawDataChannel extends LatchDecrementingRawDataChannel {
+		public List<RawData> messages = new ArrayList<RawData>();
+		
+		@Override
+		public synchronized void receiveData(RawData raw) {
+			messages.add(raw);
+			super.receiveData(raw);
+		}
+	}
+	
+	private static class CountingConnectionStore implements ConnectionStore {
+		private ConnectionStore delegate;
+		public AtomicInteger putCounter = new AtomicInteger();
+		public AtomicInteger removeCounter = new AtomicInteger();
+		
+		public CountingConnectionStore(ConnectionStore delegate) {
+			this.delegate = delegate;
+		}
+		
+		@Override
+		public boolean put(Connection connection) {
+			putCounter.incrementAndGet();
+			return delegate.put(connection);
+		}
+
+		@Override
+		public int remainingCapacity() {
+			return delegate.remainingCapacity();
+		}
+
+		@Override
+		public Connection get(InetSocketAddress peerAddress) {
+			return delegate.get(peerAddress);
+		}
+
+		@Override
+		public Connection find(SessionId id) {
+			return delegate.find(id);
+		}
+
+		@Override
+		public Connection remove(InetSocketAddress peerAddress) {
+			removeCounter.incrementAndGet();
+			return delegate.remove(peerAddress);
+		}
+	}
+	
 	private interface RawDataProcessor {
 		RawData process(RawData request);
 	}
 	
 	private interface DataHandler {
 		void handleData(byte[] data);
+	}
+	
+	private static class BlockingData extends RawData {
+		private boolean block;
+		
+		public BlockingData(byte[] data, InetSocketAddress address) {
+			super(data, address);
+		}
+		
+		public synchronized void setBlocking(boolean block) {
+			System.out.println("set blocking " + block);
+			this.block = block;
+			notifyAll();
+		}
+		
+		@Override
+		public byte[] getBytes() {
+			synchronized (this) {
+				while (block) {
+					try {
+						System.out.println("wait blocking");
+						wait(1000);
+					} catch (InterruptedException e) {
+						break;
+					}
+				}
+			}
+			return super.getBytes();
+		}
+		
 	}
 	
 	private class UdpConnector {
