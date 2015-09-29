@@ -24,6 +24,7 @@
  *                                                    keeping all information about the connection
  *                                                    to a peer in a single place
  *    Kai Hudalla (Bosch Software Innovations GmbH) - fix bug 472196
+ *    Achim Kraus (Bosch Software Innovations GmbH) - fix bug 478535, 478538
  ******************************************************************************/
 package org.eclipse.californium.scandium;
 
@@ -233,9 +234,12 @@ public class DTLSConnector implements Connector {
 	 * @param peerAddress the address of the peer to close the connection to
 	 */
 	public final void close(InetSocketAddress peerAddress) {
-		AlertMessage closeNotify = new AlertMessage(AlertLevel.WARNING,
-				AlertDescription.CLOSE_NOTIFY, peerAddress);
-		terminateConnection(peerAddress, closeNotify);
+		boolean queueFull = !outboundMessages.offer(new CloseData(peerAddress));
+		if (queueFull) {
+			AlertMessage closeNotify = new AlertMessage(AlertLevel.WARNING,
+					AlertDescription.CLOSE_NOTIFY, peerAddress);
+			terminateConnection(peerAddress, closeNotify);
+		}
 	}
 	
 	@Override
@@ -540,7 +544,13 @@ public class DTLSConnector implements Connector {
 					terminateConnection(peerAddress, bye);
 				}
 			} else {
-				// alert is not fatal, ignore for now
+				// alert is not fatal, ignore for now except CLOSE_NOTIFY
+				if (AlertDescription.CLOSE_NOTIFY == alert.getDescription()) {
+					// respond with CLOSE_NOTIFY as mandated by TLS 1.2, section 7.2.1
+					// http://tools.ietf.org/html/rfc5246#section-7.2.1
+					AlertMessage bye = new AlertMessage(AlertLevel.WARNING, AlertDescription.CLOSE_NOTIFY, peerAddress);
+					terminateConnection(peerAddress, bye);
+				}
 			}
 			if (errorHandler != null) {
 				errorHandler.onError(peerAddress, alert.getLevel(), alert.getDescription());
@@ -858,6 +868,13 @@ public class DTLSConnector implements Connector {
 		}
 		
 		InetSocketAddress peerAddress = message.getInetSocketAddress();
+		if (message instanceof CloseData) {
+			AlertMessage closeNotify = new AlertMessage(AlertLevel.WARNING,
+					AlertDescription.CLOSE_NOTIFY, peerAddress);
+			terminateConnection(peerAddress, closeNotify);
+			return;
+		}
+
 		LOGGER.log(Level.FINER, "Sending application layer message to peer [{0}]", peerAddress);
 		Connection connection = connectionStore.get(peerAddress);
 		
@@ -1115,6 +1132,22 @@ public class DTLSConnector implements Connector {
 		protected abstract void doWork() throws Exception;
 	}
 
+	/**
+	 * DTLSSession close indicator.
+	 */
+	private static class CloseData extends RawData {
+		private static final byte[] EMPTY = new byte[0];
+
+		/**
+		 * Create close indicator for provided address.
+		 * 
+		 * @param address address of DTLS session to be closed.
+		 */
+		public CloseData(InetSocketAddress address) {
+			super(EMPTY, address);
+		}
+	}
+	
 	@Override
 	public void setRawDataReceiver(RawDataChannel messageHandler) {
 		this.messageHandler = messageHandler;
