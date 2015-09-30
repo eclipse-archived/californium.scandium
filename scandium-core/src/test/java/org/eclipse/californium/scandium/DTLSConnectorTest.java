@@ -20,6 +20,7 @@
  *                                                    keeping all information about the connection
  *                                                    to a peer in a single place
  *    Kai Hudalla (Bosch Software Innovations GmbH) - fix bug 472196
+ *    Achim Kraus (Bosch Software Innovations GmbH) - add test for close()
  ******************************************************************************/
 package org.eclipse.californium.scandium;
 
@@ -33,6 +34,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertEquals;
 
 import java.io.IOException;
 import java.net.DatagramPacket;
@@ -51,6 +53,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.security.auth.x500.X500Principal;
 
@@ -109,7 +112,7 @@ public class DTLSConnectorTest {
 	InetSocketAddress clientEndpoint;
 	LatchDecrementingRawDataChannel clientRawDataChannel;
 	DTLSSession establishedSession;
-	ConnectionStore clientSessionStore;
+	CountingConnectionStore clientSessionStore;
 
 	@BeforeClass
 	public static void loadKeys() throws IOException, GeneralSecurityException {
@@ -162,7 +165,7 @@ public class DTLSConnectorTest {
 	@Before
 	public void setUp() throws Exception {
 
-		clientSessionStore = new InMemoryConnectionStore(5, 60);
+		clientSessionStore = new CountingConnectionStore(new InMemoryConnectionStore(5, 60));
 		clientEndpoint = new InetSocketAddress(InetAddress.getLocalHost(), 0);
 		clientConfig = newStandardConfig(clientEndpoint);
 
@@ -192,6 +195,31 @@ public class DTLSConnectorTest {
 		givenAnEstablishedSession();
 	}
 
+	@Test
+	public void testConnectorClose() throws Exception {
+		RawData msgToSend = new RawData("Hello World".getBytes(), serverEndpoint);
+
+		CountDownLatch latch = new CountDownLatch(1);
+		clientRawDataChannel.setLatch(latch);
+		client.setRawDataReceiver(clientRawDataChannel);
+		client.start();
+		clientEndpoint = client.getAddress();
+		client.send(msgToSend);
+
+		// check, if session is established
+		assertTrue(latch.await(MAX_TIME_TO_WAIT_SECS, TimeUnit.SECONDS));
+		assertTrue(isSessionEstablished(clientEndpoint, serverSessionStore));
+		assertTrue(isSessionEstablished(serverEndpoint, clientSessionStore));
+
+		client.close(serverEndpoint);
+
+		assertTrue("session at client not removed!", waitForSessionRemove(MAX_TIME_TO_WAIT_SECS, TimeUnit.SECONDS, serverEndpoint, clientSessionStore));
+		assertTrue("session at server not removed!", waitForSessionRemove(MAX_TIME_TO_WAIT_SECS, TimeUnit.SECONDS, clientEndpoint, serverSessionStore));
+		assertEquals(1, clientSessionStore.putCounter.get());
+		assertEquals(1, clientSessionStore.removeCounter.get());
+		client.releaseSocket();
+	}
+	
 	/**
 	 * Verifies behavior described in <a href="http://tools.ietf.org/html/rfc6347#section-4.2.8">
 	 * section 4.2.8 of RFC 6347 (DTLS 1.2)</a>.
@@ -618,6 +646,25 @@ public class DTLSConnectorTest {
 		assertNotNull(establishedSession);
 		client.releaseSocket();
 	}
+
+	private boolean waitForSessionRemove(long timeout, TimeUnit unit, InetSocketAddress clientEndpoint, ConnectionStore store) {
+		final long end = System.currentTimeMillis() + TimeUnit.MILLISECONDS.convert(timeout, unit);
+		do {
+			if (!isSessionEstablished(clientEndpoint, store)) return true;
+			try {
+				Thread.sleep(100);
+			} catch(InterruptedException ex) {
+			}
+		} while(System.currentTimeMillis() < end);
+		return !isSessionEstablished(clientEndpoint, store);
+	}
+
+	private boolean isSessionEstablished(InetSocketAddress clientEndpoint, ConnectionStore store) {
+		Connection con = store.get(clientEndpoint);
+		if (null == con) return false;
+		DTLSSession establishedSession = con.getEstablishedSession();
+		return (null != establishedSession);
+	}
 	
 	private class LatchDecrementingRawDataChannel extends SimpleRawDataChannel {
 		private CountDownLatch latch;
@@ -659,6 +706,43 @@ public class DTLSConnectorTest {
 					server.send(response);
 				}
 			}
+		}
+	}
+
+	private static class CountingConnectionStore implements ConnectionStore {
+		private ConnectionStore delegate;
+		public AtomicInteger putCounter = new AtomicInteger();
+		public AtomicInteger removeCounter = new AtomicInteger();
+		
+		public CountingConnectionStore(ConnectionStore delegate) {
+			this.delegate = delegate;
+		}
+		
+		@Override
+		public boolean put(Connection connection) {
+			putCounter.incrementAndGet();
+			return delegate.put(connection);
+		}
+
+		@Override
+		public int remainingCapacity() {
+			return delegate.remainingCapacity();
+		}
+
+		@Override
+		public Connection get(InetSocketAddress peerAddress) {
+			return delegate.get(peerAddress);
+		}
+
+		@Override
+		public Connection find(SessionId id) {
+			return delegate.find(id);
+		}
+
+		@Override
+		public Connection remove(InetSocketAddress peerAddress) {
+			removeCounter.incrementAndGet();
+			return delegate.remove(peerAddress);
 		}
 	}
 	

@@ -24,6 +24,7 @@
  *                                                    keeping all information about the connection
  *                                                    to a peer in a single place
  *    Kai Hudalla (Bosch Software Innovations GmbH) - fix bug 472196
+ *    Achim Kraus (Bosch Software Innovations GmbH) - fix bug 478538
  ******************************************************************************/
 package org.eclipse.californium.scandium;
 
@@ -540,7 +541,13 @@ public class DTLSConnector implements Connector {
 					terminateConnection(peerAddress, bye);
 				}
 			} else {
-				// alert is not fatal, ignore for now
+				// alert is not fatal, ignore for now except CLOSE_NOTIFY
+				if (AlertDescription.CLOSE_NOTIFY == alert.getDescription()) {
+					// respond with CLOSE_NOTIFY as mandated by TLS 1.2, section 7.2.1
+					// http://tools.ietf.org/html/rfc5246#section-7.2.1
+					AlertMessage bye = new AlertMessage(AlertLevel.WARNING, AlertDescription.CLOSE_NOTIFY, peerAddress);
+					terminateConnection(peerAddress, bye);
+				}
 			}
 			if (errorHandler != null) {
 				errorHandler.onError(peerAddress, alert.getLevel(), alert.getDescription());
