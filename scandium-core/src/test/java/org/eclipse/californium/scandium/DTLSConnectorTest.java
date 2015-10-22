@@ -35,6 +35,7 @@ import java.net.InetSocketAddress;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
+import java.security.Principal;
 import java.security.PrivateKey;
 import java.security.SecureRandom;
 import java.security.cert.Certificate;
@@ -45,6 +46,7 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.security.auth.x500.X500Principal;
 
@@ -380,6 +382,8 @@ public class DTLSConnectorTest {
 		final String msg = "Hello Again";
 		CountDownLatch latch = new CountDownLatch(1);
 		clientRawDataChannel.setLatch(latch);
+		IdentityProcessor identityProcessor = new IdentityProcessor();
+		serverRawDataChannel.processor = identityProcessor;
 
 		// send message
 		client.send(new RawData(msg.getBytes(), serverEndpoint));
@@ -388,6 +392,7 @@ public class DTLSConnectorTest {
 		// check we use the same session id
 		connection = clientConnectionStore.get(serverEndpoint);
 		assertArrayEquals(sessionId, connection.getEstablishedSession().getSessionIdentifier().getSessionId());
+		assertTrue(RawPublicKeyIdentity.class.isInstance(identityProcessor.principal.get()));
 	}
 
 	@Test
@@ -406,6 +411,8 @@ public class DTLSConnectorTest {
 		final String msg = "Hello Again";
 		CountDownLatch latch = new CountDownLatch(1);
 		clientRawDataChannel.setLatch(latch);
+		IdentityProcessor identityProcessor = new IdentityProcessor();
+		serverRawDataChannel.processor = identityProcessor;
 
 		// send message
 		client.send(new RawData(msg.getBytes(), serverEndpoint));
@@ -414,6 +421,7 @@ public class DTLSConnectorTest {
 		// check we use the same session id
 		connection = clientConnectionStore.get(serverEndpoint);
 		assertArrayEquals(sessionId, connection.getEstablishedSession().getSessionIdentifier().getSessionId());
+		assertTrue(RawPublicKeyIdentity.class.isInstance(identityProcessor.principal.get()));
 	}
 
 	@Test
@@ -432,6 +440,8 @@ public class DTLSConnectorTest {
 		final String msg = "Hello Again";
 		CountDownLatch latch = new CountDownLatch(1);
 		clientRawDataChannel.setLatch(latch);
+		IdentityProcessor identityProcessor = new IdentityProcessor();
+		serverRawDataChannel.processor = identityProcessor;
 
 		// remove session from server
 		serverConnectionStore.remove(clientEndpoint);
@@ -443,6 +453,7 @@ public class DTLSConnectorTest {
 		// check session id was not equals
 		connection = clientConnectionStore.get(serverEndpoint);
 		Assert.assertThat(sessionId, not(equalTo(connection.getEstablishedSession().getSessionIdentifier().getSessionId())));
+		assertTrue(RawPublicKeyIdentity.class.isInstance(identityProcessor.principal.get()));
 	}
 
 	@Test
@@ -770,6 +781,16 @@ public class DTLSConnectorTest {
 
 	private interface RawDataProcessor {
 		RawData process(RawData request);
+	}
+	
+	private class IdentityProcessor implements RawDataProcessor{
+			public AtomicReference<Principal> principal = new AtomicReference<>();
+			
+			@Override
+			public RawData process(RawData request) {
+				principal.set(request.getSenderIdentity());
+				return new RawData("ACK".getBytes(), request.getInetSocketAddress());
+			}
 	}
 	
 	private interface DataHandler {
