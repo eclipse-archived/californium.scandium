@@ -102,7 +102,7 @@ public class DTLSConnectorTest {
 	private static InMemoryConnectionStore serverConnectionStore;
 	private static Certificate[] trustedCertificates;
 	private static SimpleRawDataChannel serverRawDataChannel;
-	private static RawDataProcessor defaultRawDataProcessor;
+	private static RawDataProcessor serverRawDataProcessor;
 	
 	DtlsConnectorConfig clientConfig;
 	DTLSConnector client;
@@ -120,19 +120,11 @@ public class DTLSConnectorTest {
 		clientPrivateKey = (PrivateKey) keyStore.getKey(DtlsTestTools.CLIENT_NAME, DtlsTestTools.KEY_STORE_PASSWORD.toCharArray());
 		// load the trust store
 		trustedCertificates = DtlsTestTools.getTrustedCertificates();
-		
+
 		serverConnectionStore = new InMemoryConnectionStore(2, 5 * 60); // capacity 1, connection timeout 5mins
-		defaultRawDataProcessor = new RawDataProcessor() {
-			
-			@Override
-			public RawData process(RawData request) {
-				// echo request
-				return new RawData("ACK".getBytes(), request.getInetSocketAddress());
-			}
-		};
-		
-		serverRawDataChannel = new SimpleRawDataChannel(defaultRawDataProcessor);
-		
+		serverRawDataProcessor = new ClientIdentityCapturingProcessor();
+		serverRawDataChannel = new SimpleRawDataChannel(serverRawDataProcessor);
+
 		InMemoryPskStore pskStore = new InMemoryPskStore();
 		pskStore.setKey(CLIENT_IDENTITY, CLIENT_IDENTITY_SECRET.getBytes());
 		serverConfig = new DtlsConnectorConfig.Builder(new InetSocketAddress(InetAddress.getLocalHost(), 0))
@@ -159,7 +151,7 @@ public class DTLSConnectorTest {
 	public static void tearDown() {
 		server.destroy();
 	}
-	
+
 	@Before
 	public void setUp() throws Exception {
 
@@ -168,7 +160,7 @@ public class DTLSConnectorTest {
 		clientConfig = newStandardConfig(clientEndpoint);
 
 		client = new DTLSConnector(clientConfig, clientConnectionStore);
-		
+
 		clientRawDataChannel = new LatchDecrementingRawDataChannel();
 	}
 
@@ -178,7 +170,7 @@ public class DTLSConnectorTest {
 			client.destroy();
 		}
 		serverConnectionStore.clear();
-		serverRawDataChannel.setProcessor(defaultRawDataProcessor);
+		serverRawDataChannel.setProcessor(serverRawDataProcessor);
 		server.setErrorHandler(null);
 	}
 
@@ -382,8 +374,6 @@ public class DTLSConnectorTest {
 		final String msg = "Hello Again";
 		CountDownLatch latch = new CountDownLatch(1);
 		clientRawDataChannel.setLatch(latch);
-		IdentityProcessor identityProcessor = new IdentityProcessor();
-		serverRawDataChannel.processor = identityProcessor;
 
 		// send message
 		client.send(new RawData(msg.getBytes(), serverEndpoint));
@@ -392,7 +382,7 @@ public class DTLSConnectorTest {
 		// check we use the same session id
 		connection = clientConnectionStore.get(serverEndpoint);
 		assertArrayEquals(sessionId, connection.getEstablishedSession().getSessionIdentifier().getSessionId());
-		assertTrue(RawPublicKeyIdentity.class.isInstance(identityProcessor.principal.get()));
+		assertClientIdentity(RawPublicKeyIdentity.class);
 	}
 
 	@Test
@@ -411,8 +401,6 @@ public class DTLSConnectorTest {
 		final String msg = "Hello Again";
 		CountDownLatch latch = new CountDownLatch(1);
 		clientRawDataChannel.setLatch(latch);
-		IdentityProcessor identityProcessor = new IdentityProcessor();
-		serverRawDataChannel.processor = identityProcessor;
 
 		// send message
 		client.send(new RawData(msg.getBytes(), serverEndpoint));
@@ -421,7 +409,7 @@ public class DTLSConnectorTest {
 		// check we use the same session id
 		connection = clientConnectionStore.get(serverEndpoint);
 		assertArrayEquals(sessionId, connection.getEstablishedSession().getSessionIdentifier().getSessionId());
-		assertTrue(RawPublicKeyIdentity.class.isInstance(identityProcessor.principal.get()));
+		assertClientIdentity(RawPublicKeyIdentity.class);
 	}
 
 	@Test
@@ -440,8 +428,6 @@ public class DTLSConnectorTest {
 		final String msg = "Hello Again";
 		CountDownLatch latch = new CountDownLatch(1);
 		clientRawDataChannel.setLatch(latch);
-		IdentityProcessor identityProcessor = new IdentityProcessor();
-		serverRawDataChannel.processor = identityProcessor;
 
 		// remove session from server
 		serverConnectionStore.remove(clientEndpoint);
@@ -453,7 +439,7 @@ public class DTLSConnectorTest {
 		// check session id was not equals
 		connection = clientConnectionStore.get(serverEndpoint);
 		Assert.assertThat(sessionId, not(equalTo(connection.getEstablishedSession().getSessionIdentifier().getSessionId())));
-		assertTrue(RawPublicKeyIdentity.class.isInstance(identityProcessor.principal.get()));
+		assertClientIdentity(RawPublicKeyIdentity.class);
 	}
 
 	@Test
@@ -570,10 +556,12 @@ public class DTLSConnectorTest {
 	 */
 	@Test
 	public void testProcessApplicationMessageAddsRawPublicKeyIdentity() throws Exception {
-		
+
+		givenAnEstablishedSession();
+
 		assertClientIdentity(RawPublicKeyIdentity.class);
 	}
-	
+
 	/**
 	 * Verifies that the connector includes a <code>PreSharedKeyIdentity</code> representing
 	 * the authenticated client in the <code>RawData</code> object passed to the application
@@ -581,11 +569,14 @@ public class DTLSConnectorTest {
 	 */
 	@Test
 	public void testProcessApplicationMessageAddsPreSharedKeyIdentity() throws Exception {
-		// verify Pre-shared Key identity
+
+		// given an established session with a client using PSK authentication
 		clientConfig = new DtlsConnectorConfig.Builder(clientEndpoint)
 			.setPskStore(new StaticPskStore(CLIENT_IDENTITY, CLIENT_IDENTITY_SECRET.getBytes()))
 			.build();
 		client = new DTLSConnector(clientConfig, clientConnectionStore);
+		givenAnEstablishedSession();
+
 		assertClientIdentity(PreSharedKeyIdentity.class);
 	}
 	
@@ -596,13 +587,16 @@ public class DTLSConnectorTest {
 	 */
 	@Test
 	public void testProcessApplicationMessageAddsX500Principal() throws Exception {
-		// verify X500 principal
+
+		// given an established session with a client using X.509 based authentication
 		clientConfig = new DtlsConnectorConfig.Builder(clientEndpoint)
-			.setIdentity((PrivateKey) keyStore.getKey("client", DtlsTestTools.KEY_STORE_PASSWORD.toCharArray()),
-				keyStore.getCertificateChain("client"), false)
+			.setIdentity((PrivateKey) keyStore.getKey(DtlsTestTools.CLIENT_NAME, DtlsTestTools.KEY_STORE_PASSWORD.toCharArray()),
+				keyStore.getCertificateChain(DtlsTestTools.CLIENT_NAME), false)
 			.setTrustStore(trustedCertificates)
 			.build();
 		client = new DTLSConnector(clientConfig, clientConnectionStore);
+		givenAnEstablishedSession();
+
 		assertClientIdentity(X500Principal.class);
 	}
 
@@ -615,37 +609,31 @@ public class DTLSConnectorTest {
 	@Ignore
 	@Test
 	public void testProcessApplicationUsesNullPrincipalForUnauthenticatedPeer() throws Exception {
-		
+
+		// given an established session with a server that doesn't require
+		// clients to authenticate
 		serverConfig = new DtlsConnectorConfig.Builder(serverEndpoint)
 				.setIdentity(
-						(PrivateKey) keyStore.getKey("server", DtlsTestTools.KEY_STORE_PASSWORD.toCharArray()),
-						keyStore.getCertificateChain("server"),
+						(PrivateKey) keyStore.getKey(DtlsTestTools.SERVER_NAME, DtlsTestTools.KEY_STORE_PASSWORD.toCharArray()),
+						keyStore.getCertificateChain(DtlsTestTools.SERVER_NAME),
 						true)
 				.setClientAuthenticationRequired(false)
 				.build();
 		server = new DTLSConnector(serverConfig, serverConnectionStore);
+		givenAnEstablishedSession();
 
 		assertClientIdentity(null);
 	}
 
 	@SuppressWarnings("rawtypes")
-	private void assertClientIdentity(final Class principalType) throws Exception {
+	private void assertClientIdentity(final Class principalType) {
 
-		final AtomicBoolean senderIdentityVerified = new AtomicBoolean();
-		serverRawDataChannel.setProcessor(new RawDataProcessor() {
-			
-			@Override
-			public RawData process(RawData request) {
-				if (principalType == null) {
-					senderIdentityVerified.set(request.getSenderIdentity() == null);
-				} else {
-					senderIdentityVerified.set(principalType.isInstance(request.getSenderIdentity()));
-				}
-				return new RawData("ACK".getBytes(), request.getInetSocketAddress());
-			}
-		});
-		givenAnEstablishedSession();
-		assertThat(senderIdentityVerified.get(), is(Boolean.TRUE));
+		// assert that client identity is of given type
+		if (principalType == null) {
+			assertThat(serverRawDataProcessor.getClientIdentity(), is(nullValue()));
+		} else {
+			assertThat(serverRawDataProcessor.getClientIdentity(), instanceOf(principalType));
+		}
 	}
 
 	@Test
@@ -781,35 +769,41 @@ public class DTLSConnectorTest {
 
 	private interface RawDataProcessor {
 		RawData process(RawData request);
+		Principal getClientIdentity();
 	}
-	
-	private class IdentityProcessor implements RawDataProcessor{
-			public AtomicReference<Principal> principal = new AtomicReference<>();
-			
-			@Override
-			public RawData process(RawData request) {
-				principal.set(request.getSenderIdentity());
-				return new RawData("ACK".getBytes(), request.getInetSocketAddress());
-			}
+
+	private static class ClientIdentityCapturingProcessor implements RawDataProcessor{
+		private AtomicReference<Principal> principal = new AtomicReference<>();
+
+		@Override
+		public RawData process(RawData request) {
+			principal.set(request.getSenderIdentity());
+			return new RawData("ACK".getBytes(), request.getInetSocketAddress());
+		}
+
+		@Override
+		public Principal getClientIdentity() {
+			return principal.get();
+		}
 	}
-	
+
 	private interface DataHandler {
 		void handleData(byte[] data);
 	}
-	
+
 	private class UdpConnector {
-		
+
 		InetSocketAddress address;
 		DatagramSocket socket;
 		AtomicBoolean running = new AtomicBoolean();
 		DataHandler handler;
 		Thread receiver;
-		
+
 		public UdpConnector(final InetSocketAddress bindToAddress, final DataHandler dataHandler, final DtlsConnectorConfig config) {
 			this.address = bindToAddress;
 			this.handler = dataHandler;
 			Runnable rec = new Runnable() {
-				
+
 				@Override
 				public void run() {
 					byte[] buf = new byte[8192];
