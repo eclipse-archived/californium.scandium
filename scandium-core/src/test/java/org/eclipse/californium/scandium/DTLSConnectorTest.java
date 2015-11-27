@@ -68,6 +68,8 @@ import org.eclipse.californium.scandium.dtls.DTLSSession;
 import org.eclipse.californium.scandium.dtls.DtlsTestTools;
 import org.eclipse.californium.scandium.dtls.HandshakeMessage;
 import org.eclipse.californium.scandium.dtls.HandshakeType;
+import org.eclipse.californium.scandium.dtls.Handshaker;
+import org.eclipse.californium.scandium.dtls.HelloVerifyRequest;
 import org.eclipse.californium.scandium.dtls.InMemoryConnectionStore;
 import org.eclipse.californium.scandium.dtls.ProtocolVersion;
 import org.eclipse.californium.scandium.dtls.Record;
@@ -314,6 +316,24 @@ public class DTLSConnectorTest {
 		assertThat("Server should have reused existing session with client instead of creating a new one",
 				con.getEstablishedSession().getSessionIdentifier(),
 				is(establishedServerSession.getSessionIdentifier()));
+	}
+	
+	/**
+	 * Verifies behavior described in <a href="http://tools.ietf.org/html/rfc6347#section-4.2.8">
+	 * section 4.2.8 of RFC 6347 (DTLS 1.2)</a>.
+	 */
+	@Test
+	public void testAcceptClientHelloAfterIncompleteHandshake() throws Exception {
+		// client crashed during an handshake, now we try to establish a new session with a client connecting from the
+		// same IP address and port again
+		givenAnIncompleteHandshake();
+		
+		// reuse the same IP
+		clientConfig = newStandardConfig(clientEndpoint);
+		client = new DTLSConnector(clientConfig, clientConnectionStore);
+		
+		// try to do a a new handshake
+		givenAnEstablishedSession();
 	}
 	
 	/**
@@ -738,6 +758,77 @@ public class DTLSConnectorTest {
 			client.releaseSocket();
 		}
 	}
+	
+	private abstract class LatchDataHandler implements DataHandler {
+		private CountDownLatch latch;
+		
+		public LatchDataHandler(CountDownLatch latch){
+			this.setLatch(latch);
+		}
+		
+		@Override
+		public void handleData(byte[] data) {
+			if (handle(data))
+				latch.countDown();
+		}
+		
+		public abstract boolean handle(byte[] data);
+
+		public void setLatch(CountDownLatch latch) {
+			this.latch = latch;
+		}
+	};
+	
+	private void givenAnIncompleteHandshake() throws Exception {
+		// configure UDP connector
+		CountDownLatch latch = new CountDownLatch(1);
+		final List<Record> receivedRecords = new ArrayList<>();
+		LatchDataHandler handler = new LatchDataHandler(latch) {
+			@Override
+			public boolean handle(byte[] data) {
+				receivedRecords.addAll(Record.fromByteArray(data, serverEndpoint));
+				return true;
+			}
+		};
+		UdpConnector rawClient = new UdpConnector(clientEndpoint, handler, clientConfig);
+		rawClient.start();
+		clientEndpoint = new InetSocketAddress(rawClient.socket.getLocalAddress(),rawClient.socket.getLocalPort());
+		
+		// send CLIENT_HELLO
+		ClientHello clientHello = createClientHello();
+		rawClient.sendRecord(serverEndpoint,
+				DtlsTestTools.newDTLSRecord(ContentType.HANDSHAKE.getCode(), 0, 0, clientHello.toByteArray()));
+
+		// handle HELLO_VERIFY_REQUEST
+		assertTrue(latch.await(MAX_TIME_TO_WAIT_SECS, TimeUnit.SECONDS));
+		Record record = receivedRecords.get(0);
+		assertThat("Expected HANDSHAKE message from server",
+				record.getType(), is(ContentType.HANDSHAKE));
+		HandshakeMessage msg = (HandshakeMessage) record.getFragment();
+		assertThat("Expected HELLO_VERIFY_REQUEST from server",
+				msg.getMessageType(), is(HandshakeType.HELLO_VERIFY_REQUEST));
+		Connection con = serverConnectionStore.get(clientEndpoint);
+		assertNull(con);
+		byte[] cookie = ((HelloVerifyRequest)msg).getCookie();
+		assertNotNull(cookie);
+		receivedRecords.clear();
+		
+		// send CLIENT_HELLO with cookie
+		latch = new CountDownLatch(1);
+		handler.setLatch(latch);
+		clientHello.setCookie(cookie);
+		clientHello.setFragmentLength(clientHello.getMessageLength());
+		rawClient.sendRecord(serverEndpoint, DtlsTestTools.newDTLSRecord(ContentType.HANDSHAKE.getCode(), 0,0, clientHello.toByteArray()));
+		
+		// check we have an ongoingHandshake for this connection
+		assertTrue(latch.await(MAX_TIME_TO_WAIT_SECS, TimeUnit.SECONDS));
+		con = serverConnectionStore.get(clientEndpoint);
+		assertNotNull(con);
+		Handshaker ongoingHandshake = con.getOngoingHandshake();
+		assertNotNull(ongoingHandshake);
+		rawClient.socket.close();
+	}
+	
 
 	private class LatchDecrementingRawDataChannel extends SimpleRawDataChannel {
 		private CountDownLatch latch;
