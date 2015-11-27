@@ -413,7 +413,12 @@ public class DTLSConnector implements Connector {
 					processChangeCipherSpecRecord(peerAddress, record);
 					break;
 				case HANDSHAKE:
-					processHandshakeRecord(peerAddress, record);
+					try{
+						processHandshakeRecord(peerAddress, record);	
+					}catch (RuntimeException e){
+						LOGGER.log(Level.INFO, String.format("Aborting handshake with peer %s because of unexpected exception",peerAddress), e);
+						terminateOngoingHandshake(peerAddress, new AlertMessage(AlertLevel.FATAL,AlertDescription.INTERNAL_ERROR,peerAddress));
+					}
 				}
 			} catch (InvalidMacException e) {
 				// this means that the message from the record could not be authenticated
