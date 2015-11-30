@@ -877,4 +877,8 @@ public class ServerHandshaker extends Handshaker {
 	final SupportedGroup getNegotiatedSupportedGroup() {
 		return negotiatedSupportedGroup;
 	}
+
+	public Random getClientRandom(){
+		return clientRandom;
+	}
 }
