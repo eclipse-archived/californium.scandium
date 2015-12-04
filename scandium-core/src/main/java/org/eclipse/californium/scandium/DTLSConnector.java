@@ -78,6 +78,7 @@ import org.eclipse.californium.scandium.dtls.HelloVerifyRequest;
 import org.eclipse.californium.scandium.dtls.InMemoryConnectionStore;
 import org.eclipse.californium.scandium.dtls.MaxFragmentLengthExtension;
 import org.eclipse.californium.scandium.dtls.ProtocolVersion;
+import org.eclipse.californium.scandium.dtls.Random;
 import org.eclipse.californium.scandium.dtls.Record;
 import org.eclipse.californium.scandium.dtls.ResumingClientHandshaker;
 import org.eclipse.californium.scandium.dtls.ResumingServerHandshaker;
@@ -412,7 +413,12 @@ public class DTLSConnector implements Connector {
 					processChangeCipherSpecRecord(peerAddress, record);
 					break;
 				case HANDSHAKE:
-					processHandshakeRecord(peerAddress, record);
+					try{
+						processHandshakeRecord(peerAddress, record);	
+					}catch (RuntimeException e){
+						LOGGER.log(Level.INFO, String.format("Aborting handshake with peer %s because of unexpected exception",peerAddress), e);
+						terminateOngoingHandshake(peerAddress, new AlertMessage(AlertLevel.FATAL,AlertDescription.INTERNAL_ERROR,peerAddress));
+					}
 				}
 			} catch (InvalidMacException e) {
 				// this means that the message from the record could not be authenticated
@@ -646,41 +652,43 @@ public class DTLSConnector implements Connector {
 		LOGGER.log(Level.FINER, "Received HANDSHAKE record from peer [{0}]", peerAddress);
 		DTLSFlight flight;
 		Connection connection = connectionStore.get(peerAddress);
-		if (connection != null && connection.getOngoingHandshake() != null) {
-			// we are already in an ongoing handshake
-			// simply delegate the processing of the record to the handshaker
-			flight = connection.getOngoingHandshake().processMessage(record);
-		} else {
 
-			if (record.getEpoch()>0){
-				if (connection != null && connection.getEstablishedSession() != null){
-					// we received a record with Epoch > 0 and we have an established session
-					// so, we use it to decrypt the handshake message.
-					record.setSession(connection.getEstablishedSession());
-				}
-				else
-				{
-					LOGGER.log(Level.FINER, "Discarding unexpected handshake message with epoch > 0 from peer [{0}] with no session established.",
-							new Object[]{peerAddress});
-					return;
-				}
+		// Get session to decode record correctly
+		if (connection != null && connection.getOngoingHandshake()!=null){	
+			record.setSession(connection.getOngoingHandshake().getSession());
+		}else if (record.getEpoch()>0){
+			if (connection != null && connection.getEstablishedSession() != null){
+				// we received a record with Epoch > 0 and we have an established session
+				// so, we use it to decrypt the handshake message.
+				record.setSession(connection.getEstablishedSession());
 			}
+			else{
+				LOGGER.log(Level.FINER, "Discarding unexpected handshake message with epoch > 0 from peer [{0}] with no session established.",
+						new Object[]{peerAddress});
+				return;
+			}
+		}
 
-			HandshakeMessage handshakeMessage = (HandshakeMessage) record.getFragment();
+		HandshakeMessage handshakeMessage = (HandshakeMessage) record.getFragment();
 
-			switch (handshakeMessage.getMessageType()) {
-			case HELLO_REQUEST:
-				// Peer (server) wants us (client) to initiate (re-)negotiation of session
-				flight = processHelloRequest(connection, record);
-				break;
+		switch (handshakeMessage.getMessageType()) {
+		case HELLO_REQUEST:
+			// Peer (server) wants us (client) to initiate (re-)negotiation of session
+			flight = processHelloRequest(connection, record);
+			break;
 
-			case CLIENT_HELLO:
-				// Peer (client) wants to either resume an existing session
-				// or wants to negotiate a new session with us (server)
-				flight = processClientHello(connection, record);
-				break;
+		case CLIENT_HELLO:
+			// Peer (client) wants to either resume an existing session
+			// or wants to negotiate a new session with us (server)
+			flight = processClientHello(connection, record);
+			break;
 
-			default:
+		default:
+			if (connection != null && connection.getOngoingHandshake() != null) {
+				// we are already in an handshake 
+				// simply delegate the processing of the record to the handshaker
+				flight = connection.getOngoingHandshake().processMessage(record);
+			}else{
 				LOGGER.log(Level.FINER, "Discarding unexpected handshake message of type [{0}] from peer [{1}]",
 						new Object[]{handshakeMessage.getMessageType(), peerAddress});
 				return;
@@ -732,6 +740,19 @@ public class DTLSConnector implements Connector {
 		
 		DTLSFlight nextFlight = null;
 		Connection peerConnection = connection;
+		
+ 		if (connection != null && connection.getOngoingHandshake() instanceof ServerHandshaker) {
+			// we have an ongoing handshake, so we try to find if this CLIENT_HELLO is a retransmission or a fresh new handshake 
+			ClientHello clientHello = (ClientHello) record.getFragment();
+			ServerHandshaker handshaker = (ServerHandshaker) connection.getOngoingHandshake();
+			Random messageRandom = clientHello.getRandom();
+			Random serverHandshaker = handshaker.getClientRandom();
+			// we already receive a CLIENT_HELLO with this random, so this is surely a retransmission,
+			// let handshaker handle this.
+			if (Arrays.equals(messageRandom.getRandomBytes(), serverHandshaker.getRandomBytes())) {
+				return connection.getOngoingHandshake().processMessage(record);
+			}// else handle this like fresh new CLIENT_HELLO
+		}
 		
 		if (record.getEpoch() > 0) {
 			// client tries to re-negotiate new crypto params for existing session
